@@ -435,6 +435,7 @@
     <header>
         <h1>🎧 YouTube Elo Tournament</h1>
         <p id="syncBadge" class="muted" style="margin:4px 0 0;">Checking cloud sync…</p>
+        <p id="sheetBadge" class="muted" style="margin:2px 0 0;">Sheet sync not configured</p>
     </header>
 
     <main>
@@ -522,6 +523,7 @@
             <input type="text" id="cloudToken" placeholder="Shared token set on the server" />
             <div class="row" style="margin-top:8px;">
                 <button id="btnSaveToken" class="secondary">Save token &amp; re-sync</button>
+                <button id="btnSyncSheetNow" class="secondary">Sync sheet now</button>
             </div>
 
             <div class="divider"></div>
@@ -906,6 +908,77 @@
                 'local-only': ['💾 Local only (no cloud function found)', '#9ca3af'],
                 'auth-error': ['🔒 Cloud sync token rejected — check token below', '#f87171'],
                 'error': ['⚠️ Cloud sync error', '#f87171']
+            };
+            const [text, color] = map[status] || [status, '#9ca3af'];
+            el.textContent = text;
+            el.style.color = color;
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────────
+        // GOOGLE SHEET SYNC (optional; requires functions/api/sheet.js configured
+        // on the server with a Google service account — see README.md)
+        // ─────────────────────────────────────────────────────────────────────────────
+        let sheetSyncTimer = null;
+        let sheetSyncInFlight = false;
+        let sheetAvailable = null; // null = unknown, true/false once checked
+
+        function scheduleSheetSync() {
+            if (sheetAvailable === false) return; // known not configured, skip network calls
+            clearTimeout(sheetSyncTimer);
+            sheetSyncTimer = setTimeout(pushSheetSync, 1500); // debounce
+        }
+
+        async function pushSheetSync() {
+            if (sheetSyncInFlight || !state.songs.length) return;
+            sheetSyncInFlight = true;
+            try {
+                const rows = state.songs
+                    .slice()
+                    .sort((a, b) => {
+                        if (b.elo !== a.elo) return b.elo - a.elo;
+                        if (a.rd !== b.rd) return a.rd - b.rd;
+                        return a.title.localeCompare(b.title);
+                    })
+                    .map((s, i) => ({
+                        rank: i + 1,
+                        id: s.id,
+                        title: s.title,
+                        url: s.url || '',
+                        elo: Number(s.elo.toFixed(1)),
+                        rd: Number(s.rd.toFixed(0)),
+                        matchesPlayed: s.matchesPlayed,
+                        eliminated: !!s.eliminated
+                    }));
+
+                const res = await fetch('/api/sheet', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + getCloudToken()
+                    },
+                    body: JSON.stringify({ rows })
+                });
+                if (res.status === 404) { sheetAvailable = false; setSheetBadge('not-configured'); return; }
+                if (res.status === 401 || res.status === 403) { setSheetBadge('auth-error'); return; }
+                if (!res.ok) { setSheetBadge('error'); return; }
+                sheetAvailable = true;
+                setSheetBadge('synced');
+            } catch (e) {
+                sheetAvailable = false;
+                setSheetBadge('not-configured');
+            } finally {
+                sheetSyncInFlight = false;
+            }
+        }
+
+        function setSheetBadge(status) {
+            const el = document.getElementById('sheetBadge');
+            if (!el) return;
+            const map = {
+                'synced': ['📊 Sheet synced', '#4ade80'],
+                'not-configured': ['Sheet sync not configured', '#9ca3af'],
+                'auth-error': ['🔒 Sheet sync token rejected', '#f87171'],
+                'error': ['⚠️ Sheet sync error', '#f87171']
             };
             const [text, color] = map[status] || [status, '#9ca3af'];
             el.textContent = text;
@@ -1557,8 +1630,7 @@
             });
 
             sorted.forEach((s, index) => {
-                const div = document.createElement('div');
-                div.className = 'rank-item' + (s.eliminated ? ' eliminated' : '');
+                const div = document.createElement('div');                div.className = 'rank-item' + (s.eliminated ? ' eliminated' : '');
 
                 const rdPct = Math.round(((s.rd - RD_FLOOR) / (RD_START - RD_FLOOR)) * 100);
                 const rdClass = rdPct > 66 ? 'rd-high' : rdPct > 33 ? 'rd-med' : 'rd-low';
@@ -1582,6 +1654,8 @@
           `;
                 host.appendChild(div);
             });
+
+            scheduleSheetSync();
         }
 
         // ─────────────────────────────────────────────────────────────────────────────
@@ -2071,6 +2145,11 @@
             setSyncBadge('checking');
             const changed = await pullCloudState();
             if (changed) { renderRankings(); updateStatus(); }
+        });
+
+        document.getElementById('btnSyncSheetNow').addEventListener('click', () => {
+            sheetAvailable = null;
+            pushSheetSync();
         });
 
         // ─────────────────────────────────────────────────────────────────────────────
