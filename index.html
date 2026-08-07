@@ -205,6 +205,17 @@
                     text-decoration: underline;
                 }
 
+        .slot-stats {
+            font-size: 11px;
+            color: #6b7280;
+            margin-top: 2px;
+            font-variant-numeric: tabular-nums;
+        }
+
+            .slot-stats .rd-tight { color: #4ade80; }
+            .slot-stats .rd-moderate { color: #facc15; }
+            .slot-stats .rd-uncertain { color: #f87171; }
+
         .vid-controls {
             display: flex;
             gap: 8px;
@@ -539,6 +550,7 @@
                     <div class="meta">
                         <div class="slot-header" id="slot0Title">—</div>
                         <div class="slot-url"><a id="slot0Link" href="#" target="_blank" rel="noopener">—</a></div>
+                        <div class="slot-stats" id="slot0Stats">—</div>
                     </div>
                     <div class="vid-controls">
                         <button id="btnSlot0Play">Play</button>
@@ -552,6 +564,7 @@
                     <div class="meta">
                         <div class="slot-header" id="slot1Title">—</div>
                         <div class="slot-url"><a id="slot1Link" href="#" target="_blank" rel="noopener">—</a></div>
+                        <div class="slot-stats" id="slot1Stats">—</div>
                     </div>
                     <div class="vid-controls">
                         <button id="btnSlot1Play">Play</button>
@@ -565,6 +578,7 @@
                     <div class="meta">
                         <div class="slot-header" id="slot2Title">—</div>
                         <div class="slot-url"><a id="slot2Link" href="#" target="_blank" rel="noopener">—</a></div>
+                        <div class="slot-stats" id="slot2Stats">—</div>
                     </div>
                     <div class="vid-controls">
                         <button id="btnSlot2Play">Play</button>
@@ -578,6 +592,7 @@
                     <div class="meta">
                         <div class="slot-header" id="slot3Title">—</div>
                         <div class="slot-url"><a id="slot3Link" href="#" target="_blank" rel="noopener">—</a></div>
+                        <div class="slot-stats" id="slot3Stats">—</div>
                     </div>
                     <div class="vid-controls">
                         <button id="btnSlot3Play">Play</button>
@@ -1587,6 +1602,7 @@
             const media = document.getElementById(`slot${slotIndex}Media`);
             const title = document.getElementById(`slot${slotIndex}Title`);
             const link = document.getElementById(`slot${slotIndex}Link`);
+            const stats = document.getElementById(`slot${slotIndex}Stats`);
             const slotEl = document.querySelector(`article.slot[data-slot="${slotIndex}"]`);
             destroyPlayer(slotIndex);
             media.innerHTML = '';
@@ -1595,12 +1611,19 @@
             if (!song) {
                 slotEl.style.display = 'none'; title.textContent = '—';
                 link.textContent = '—'; link.removeAttribute('href');
+                if (stats) stats.textContent = '—';
                 slotEl.dataset.songId = ''; return;
             }
             slotEl.style.display = 'block';
             title.textContent = song.title;
             link.href = song.url; link.textContent = 'Open on YouTube ↗';
             slotEl.dataset.songId = song.id;
+            if (stats) {
+                const rdPct = Math.round(((song.rd - RD_FLOOR) / (RD_START - RD_FLOOR)) * 100);
+                const rdCls = rdPct > 66 ? 'rd-uncertain' : rdPct > 33 ? 'rd-moderate' : 'rd-tight';
+                const rdLabel = rdPct > 66 ? 'uncertain' : rdPct > 33 ? 'moderate' : 'confident';
+                stats.innerHTML = `Elo: ${song.elo.toFixed(1)} &nbsp;·&nbsp; <span class="${rdCls}">±${song.rd.toFixed(0)} RD (${rdLabel})</span>`;
+            }
             const img = document.createElement('img');
             img.src = `https://i.ytimg.com/vi/${song.id}/mqdefault.jpg`;
             img.alt = song.title; img.className = 'thumb'; img.loading = 'lazy';
