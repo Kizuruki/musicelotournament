@@ -623,7 +623,7 @@
                     <thead>
                         <tr>
                             <th>ID</th><th>Title</th><th>Channel</th><th>URL</th>
-                            <th>Elo</th><th>RD</th><th>Matches</th><th>Elim?</th><th></th>
+                            <th>Elo</th><th>RD</th><th>Matches</th><th>Elim?</th><th>Elim stage</th><th></th>
                         </tr>
                     </thead>
                     <tbody id="editorTableBody"></tbody>
@@ -723,7 +723,7 @@
             return out;
         }
 
-        function makeSong(id, title, url, elo, rd, matchesPlayed, eliminated, channel, prelim) {
+        function makeSong(id, title, url, elo, rd, matchesPlayed, eliminated, channel, prelim, eliminatedStage) {
             return {
                 id,
                 title: title || 'Song',
@@ -733,7 +733,12 @@
                 matchesPlayed: (typeof matchesPlayed === 'number' && isFinite(matchesPlayed)) ? matchesPlayed : 0,
                 eliminated: !!eliminated,
                 channel: channel || '',
-                prelim: !!prelim
+                prelim: !!prelim,
+                // Stage the song was eliminated in (1 = eliminated at the first cutoff,
+                // 2 = second, etc). 0 = eliminated during prelims without ever reaching
+                // stage 1. null = still alive / not yet decided. Used so that ranking
+                // favors "made it further" over raw final Elo among eliminated songs.
+                eliminatedStage: (typeof eliminatedStage === 'number') ? eliminatedStage : null
             };
         }
 
@@ -804,7 +809,7 @@
 
         function applyLoadedState(s) {
             if (!s || !Array.isArray(s.songs) || !s.songs.length) return false;
-            state.songs = s.songs.map(x => makeSong(x.id, x.title, x.url, x.elo, x.rd, x.matchesPlayed, x.eliminated, x.channel, x.prelim));
+            state.songs = s.songs.map(x => makeSong(x.id, x.title, x.url, x.elo, x.rd, x.matchesPlayed, x.eliminated, x.channel, x.prelim, x.eliminatedStage));
             state.totalSongs = s.totalSongs ?? state.songs.length;
             state.initialCount = s.initialCount ?? state.songs.length;
             state.stageDone = s.stageDone ?? 0;
@@ -935,6 +940,12 @@
                 const rows = state.songs
                     .slice()
                     .sort((a, b) => {
+                        if (a.eliminated !== b.eliminated) return a.eliminated ? 1 : -1;
+                        if (a.eliminated && b.eliminated) {
+                            const as = a.eliminatedStage ?? -1;
+                            const bs = b.eliminatedStage ?? -1;
+                            if (as !== bs) return bs - as;
+                        }
                         if (b.elo !== a.elo) return b.elo - a.elo;
                         if (a.rd !== b.rd) return a.rd - b.rd;
                         return a.title.localeCompare(b.title);
@@ -1063,7 +1074,10 @@
 
             const keepIds = new Set(sorted.slice(0, keep).map(s => s.id));
             for (const s of state.songs) {
-                if (!s.eliminated && !s.prelim && !keepIds.has(s.id)) s.eliminated = true;
+                if (!s.eliminated && !s.prelim && !keepIds.has(s.id)) {
+                    s.eliminated = true;
+                    s.eliminatedStage = state.stageDone + 1; // stage they were competing in / got cut from
+                }
             }
 
             state.stageDone++;
@@ -1159,6 +1173,7 @@
                     s.prelim = false;
                     if (s.elo < maxElimElo) {
                         s.eliminated = true; // Auto-eliminate if below top eliminated song
+                        s.eliminatedStage = 0; // never made it past prelims
                     }
                 }
             }
@@ -1624,6 +1639,11 @@
 
             const sorted = state.songs.slice().sort((a, b) => {
                 if (a.eliminated !== b.eliminated) return a.eliminated ? 1 : -1;
+                if (a.eliminated && b.eliminated) {
+                    const as = a.eliminatedStage ?? -1;
+                    const bs = b.eliminatedStage ?? -1;
+                    if (as !== bs) return bs - as; // made it further -> ranks higher, even with a lower final Elo
+                }
                 if (b.elo !== a.elo) return b.elo - a.elo;
                 if (a.rd !== b.rd) return a.rd - b.rd;
                 return a.title.localeCompare(b.title);
@@ -1648,7 +1668,7 @@
                 <span class="pill ${rdClass}">±${s.rd.toFixed(0)} <span class="rd-bar-wrap"><span class="rd-bar" style="width:${rdPct}%"></span></span> ${rdLabel}</span>
                 <span class="pill">Range: ${lowerBound}–${upperBound}</span>
                 <span class="pill">MP: ${s.matchesPlayed}</span>
-                <span class="pill">${s.eliminated ? '❌ elim' : (s.prelim ? '⏳ prelim' : '✅ alive')}</span>
+                <span class="pill">${s.eliminated ? `❌ elim${(s.eliminatedStage ?? -1) >= 0 ? ' (stage ' + s.eliminatedStage + ')' : ''}` : (s.prelim ? '⏳ prelim' : '✅ alive')}</span>
               </div>
             </div>
           `;
@@ -1967,6 +1987,11 @@
             if (!state.songs.length) { alert('Nothing to export.'); return; }
             const sorted = state.songs.slice().sort((a, b) => {
                 if (a.eliminated !== b.eliminated) return a.eliminated ? 1 : -1;
+                if (a.eliminated && b.eliminated) {
+                    const as = a.eliminatedStage ?? -1;
+                    const bs = b.eliminatedStage ?? -1;
+                    if (as !== bs) return bs - as;
+                }
                 if (b.elo !== a.elo) return b.elo - a.elo;
                 return a.rd - b.rd;
             });
@@ -2062,6 +2087,7 @@
                     <td><input type="number" step="0.1" data-f="rd" value="${s.rd}"></td>
                     <td><input type="number" step="1" data-f="matchesPlayed" value="${s.matchesPlayed}"></td>
                     <td style="text-align:center;"><input type="checkbox" data-f="eliminated" ${s.eliminated ? 'checked' : ''}></td>
+                    <td><input type="number" step="1" data-f="eliminatedStage" value="${s.eliminatedStage ?? ''}" placeholder="—" style="width:60px;"></td>
                     <td><button class="danger" data-editor-remove style="padding:4px 8px;">✕</button></td>
                 `;
                 body.appendChild(tr);
@@ -2101,6 +2127,7 @@
                 <td><input type="number" step="0.1" data-f="rd" value="${RD_START}"></td>
                 <td><input type="number" step="1" data-f="matchesPlayed" value="0"></td>
                 <td style="text-align:center;"><input type="checkbox" data-f="eliminated"></td>
+                <td><input type="number" step="1" data-f="eliminatedStage" value="" placeholder="—" style="width:60px;"></td>
                 <td><button class="danger" data-editor-remove style="padding:4px 8px;">✕</button></td>
             `;
             document.getElementById('editorTableBody').appendChild(tr);
@@ -2126,8 +2153,16 @@
                 const rd = parseFloat(val(tr, 'rd').value);
                 const matchesPlayed = parseInt(val(tr, 'matchesPlayed').value, 10) || 0;
                 const eliminated = val(tr, 'eliminated').checked;
+                const stageRaw = val(tr, 'eliminatedStage').value.trim();
                 const existing = findSong(id);
-                const song = makeSong(id, title, url, elo, isNaN(rd) ? RD_START : rd, matchesPlayed, eliminated, channel, existing ? existing.prelim : false);
+                let eliminatedStage = stageRaw === '' ? null : parseInt(stageRaw, 10);
+                if (isNaN(eliminatedStage)) eliminatedStage = null;
+                if (eliminated && eliminatedStage === null) {
+                    // No stage entered but marked eliminated — keep prior value if we have one
+                    eliminatedStage = existing && typeof existing.eliminatedStage === 'number' ? existing.eliminatedStage : null;
+                }
+                if (!eliminated) eliminatedStage = null;
+                const song = makeSong(id, title, url, elo, isNaN(rd) ? RD_START : rd, matchesPlayed, eliminated, channel, existing ? existing.prelim : false, eliminatedStage);
                 newSongs.push(song);
             }
             pauseAllPlayers();
