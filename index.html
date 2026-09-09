@@ -506,7 +506,7 @@
             <h2>4) Bar chart race CSV</h2>
             <p class="muted">
                 Columns: name · channel · thumbnail · match_0 · match_1 · …<br>
-                Blank cells = song didn't play that match. Updated live in memory.
+                Elo is carried forward when a song doesn't play that match. Updated live in memory.
             </p>
             <div class="row" style="margin-top:4px;">
                 <button id="btnExportRace" class="secondary">Export race CSV</button>
@@ -1956,15 +1956,17 @@
                 const channelPart = csvEscape(song.channel || '');
                 const thumbPart = csvEscape(thumb);
 
-                const cells = ['1000'];
-
+                let lastElo = 1000;
+                const cells = [lastElo.toFixed(1)];
+                
                 for (let m = 1; m <= maxMatch; m++) {
                     const updates = logMap[m];
+                
                     if (updates && song.id in updates) {
-                        cells.push(updates[song.id].toFixed(1));
-                    } else {
-                        cells.push('');
+                        lastElo = updates[song.id];
                     }
+                
+                    cells.push(lastElo.toFixed(1));
                 }
 
                 rows.push([namePart, channelPart, thumbPart, ...cells.map(csvEscape)].join(','));
