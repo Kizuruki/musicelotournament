@@ -506,7 +506,7 @@
             <h2>4) Bar chart race CSV</h2>
             <p class="muted">
                 Columns: name · channel · thumbnail · match_0 · match_1 · …<br>
-                Elo is carried forward when a song doesn't play that match. Updated live in memory.
+                Blank cells = song didn't play that match. Updated live in memory.
             </p>
             <div class="row" style="margin-top:4px;">
                 <button id="btnExportRace" class="secondary">Export race CSV</button>
@@ -1363,40 +1363,54 @@
                 }
             }
 
+            // Snapshot pre-match values so every pairwise comparison in this match
+            // is evaluated from the SAME starting Elo/RD/MP, regardless of which
+            // pair gets processed first — makes the result order-independent, so
+            // no ranking slot is structurally favored just by comparison order.
+            // (Eliminated anchor songs never change here; only prelim songs do.)
+            const snapshot = {};
+            for (const id of match.ids) {
+                const s = findSong(id);
+                if (s) snapshot[id] = { elo: s.elo, rd: s.rd, matchesPlayed: s.matchesPlayed, prelim: s.prelim };
+            }
+
+            const eloDelta = {}, rdDelta = {};
+            for (const id of match.ids) { eloDelta[id] = 0; rdDelta[id] = 0; }
+
             // 2. Pairwise Elo + RD updates (eliminated songs remain frozen)
             for (let i = 0; i < rankingIds.length; i++) {
                 for (let j = i + 1; j < rankingIds.length; j++) {
-                    const winner = findSong(rankingIds[i]);
-                    const loser = findSong(rankingIds[j]);
-                    if (!winner || !loser) continue;
+                    const wId = rankingIds[i], lId = rankingIds[j];
+                    const wSnap = snapshot[wId], lSnap = snapshot[lId];
+                    if (!wSnap || !lSnap) continue;
 
-                    const Rw = winner.elo, Rl = loser.elo;
+                    const Rw = wSnap.elo, Rl = lSnap.elo;
                     const eloDiff = Math.abs(Rw - Rl);
 
                     const Ew = 1 / (1 + Math.pow(10, (Rl - Rw) / 400));
                     const El = 1 - Ew;
 
-                    if (winner.prelim) {
-                        const Kw = kFactor(winner.matchesPlayed) / (groupSize - 1);
-                        winner.elo += Kw * (1 - Ew);
-                        const decay = rdDecay(eloDiff);
-                        winner.rd = Math.max(RD_FLOOR, winner.rd - decay);
+                    if (wSnap.prelim) {
+                        const Kw = kFactor(wSnap.matchesPlayed) / (groupSize - 1);
+                        eloDelta[wId] += Kw * (1 - Ew);
+                        rdDelta[wId] += rdDecay(eloDiff);
                     }
 
-                    if (loser.prelim) {
-                        const Kl = kFactor(loser.matchesPlayed) / (groupSize - 1);
-                        loser.elo += Kl * (0 - El);
-                        const decay = rdDecay(eloDiff);
-                        loser.rd = Math.max(RD_FLOOR, loser.rd - decay);
+                    if (lSnap.prelim) {
+                        const Kl = kFactor(lSnap.matchesPlayed) / (groupSize - 1);
+                        eloDelta[lId] += Kl * (0 - El);
+                        rdDelta[lId] += rdDecay(eloDiff);
                     }
                 }
             }
 
-            // 3. Round values and update race log for prelim songs
+            // 3. Apply deltas, round, update race log for prelim songs
             const updates = {};
             for (const id of match.ids) {
                 const s = findSong(id);
                 if (s && s.prelim) {
+                    s.elo = snapshot[id].elo + eloDelta[id];
+                    s.rd = Math.max(RD_FLOOR, snapshot[id].rd - rdDelta[id]);
                     s.elo = Math.round(s.elo * 10) / 10;
                     s.rd = Math.round(s.rd * 10) / 10;
                     updates[s.id] = s.elo;
@@ -1421,36 +1435,51 @@
                 if (s) s.matchesPlayed = (s.matchesPlayed || 0) + MP_PER_APPEARANCE;
             }
 
+            // Snapshot pre-match values so every pairwise comparison in this match
+            // is evaluated from the SAME starting Elo/RD/MP, regardless of which
+            // pair gets processed first — makes the result order-independent, so
+            // no ranking slot (1st/2nd/3rd/4th) is structurally favored or
+            // penalized just because of when it happens to face an outlier.
+            const snapshot = {};
+            for (const id of ids) {
+                const s = findSong(id);
+                if (s) snapshot[id] = { elo: s.elo, rd: s.rd, matchesPlayed: s.matchesPlayed };
+            }
+
+            const eloDelta = {}, rdDelta = {};
+            for (const id of ids) { eloDelta[id] = 0; rdDelta[id] = 0; }
+
             for (let i = 0; i < rankingIds.length; i++) {
                 for (let j = i + 1; j < rankingIds.length; j++) {
-                    const winner = findSong(rankingIds[i]);
-                    const loser = findSong(rankingIds[j]);
-                    if (!winner || !loser) continue;
+                    const wId = rankingIds[i], lId = rankingIds[j];
+                    const wSnap = snapshot[wId], lSnap = snapshot[lId];
+                    if (!wSnap || !lSnap) continue;
 
-                    const Rw = winner.elo, Rl = loser.elo;
+                    const Rw = wSnap.elo, Rl = lSnap.elo;
                     const eloDiff = Math.abs(Rw - Rl);
 
-                    const Kw = kFactor(winner.matchesPlayed) / (groupSize - 1);
-                    const Kl = kFactor(loser.matchesPlayed) / (groupSize - 1);
+                    const Kw = kFactor(wSnap.matchesPlayed) / (groupSize - 1);
+                    const Kl = kFactor(lSnap.matchesPlayed) / (groupSize - 1);
 
                     const Ew = 1 / (1 + Math.pow(10, (Rl - Rw) / 400));
                     const El = 1 - Ew;
 
-                    winner.elo += Kw * (1 - Ew);
-                    loser.elo += Kl * (0 - El);
+                    eloDelta[wId] += Kw * (1 - Ew);
+                    eloDelta[lId] += Kl * (0 - El);
 
                     const decay = rdDecay(eloDiff);
-                    winner.rd = Math.max(RD_FLOOR, winner.rd - decay);
-                    loser.rd = Math.max(RD_FLOOR, loser.rd - decay);
+                    rdDelta[wId] += decay;
+                    rdDelta[lId] += decay;
                 }
             }
 
             for (const id of ids) {
                 const s = findSong(id);
-                if (s) {
-                    s.elo = Math.round(s.elo * 10) / 10;
-                    s.rd = Math.round(s.rd * 10) / 10;
-                }
+                if (!s) continue;
+                s.elo = snapshot[id].elo + eloDelta[id];
+                s.rd = Math.max(RD_FLOOR, snapshot[id].rd - rdDelta[id]);
+                s.elo = Math.round(s.elo * 10) / 10;
+                s.rd = Math.round(s.rd * 10) / 10;
             }
 
             state.matchCounter++;
@@ -1956,42 +1985,15 @@
                 const channelPart = csvEscape(song.channel || '');
                 const thumbPart = csvEscape(thumb);
 
-                // Collect the matches where this song actually has an Elo value
-                const known = [{ match: 0, elo: 1000 }];
-                
+                const cells = ['1000'];
+
                 for (let m = 1; m <= maxMatch; m++) {
                     const updates = logMap[m];
-                
                     if (updates && song.id in updates) {
-                        known.push({
-                            match: m,
-                            elo: updates[song.id]
-                        });
+                        cells.push(updates[song.id].toFixed(1));
+                    } else {
+                        cells.push('');
                     }
-                }
-                
-                const cells = new Array(maxMatch + 1);
-                
-                // Interpolate between each pair of known Elo values
-                for (let i = 0; i < known.length - 1; i++) {
-                    const a = known[i];
-                    const b = known[i + 1];
-                
-                    const distance = b.match - a.match;
-                
-                    for (let m = a.match; m <= b.match; m++) {
-                        const t = (m - a.match) / distance;
-                        const elo = a.elo + (b.elo - a.elo) * t;
-                
-                        cells[m] = elo.toFixed(1);
-                    }
-                }
-                
-                // After the song's last actual match, keep its final Elo constant
-                const last = known[known.length - 1];
-                
-                for (let m = last.match; m <= maxMatch; m++) {
-                    cells[m] = last.elo.toFixed(1);
                 }
 
                 rows.push([namePart, channelPart, thumbPart, ...cells.map(csvEscape)].join(','));
