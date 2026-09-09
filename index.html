@@ -1956,17 +1956,42 @@
                 const channelPart = csvEscape(song.channel || '');
                 const thumbPart = csvEscape(thumb);
 
-                let lastElo = 1000;
-                const cells = [lastElo.toFixed(1)];
+                // Collect the matches where this song actually has an Elo value
+                const known = [{ match: 0, elo: 1000 }];
                 
                 for (let m = 1; m <= maxMatch; m++) {
                     const updates = logMap[m];
                 
                     if (updates && song.id in updates) {
-                        lastElo = updates[song.id];
+                        known.push({
+                            match: m,
+                            elo: updates[song.id]
+                        });
                     }
+                }
                 
-                    cells.push(lastElo.toFixed(1));
+                const cells = new Array(maxMatch + 1);
+                
+                // Interpolate between each pair of known Elo values
+                for (let i = 0; i < known.length - 1; i++) {
+                    const a = known[i];
+                    const b = known[i + 1];
+                
+                    const distance = b.match - a.match;
+                
+                    for (let m = a.match; m <= b.match; m++) {
+                        const t = (m - a.match) / distance;
+                        const elo = a.elo + (b.elo - a.elo) * t;
+                
+                        cells[m] = elo.toFixed(1);
+                    }
+                }
+                
+                // After the song's last actual match, keep its final Elo constant
+                const last = known[known.length - 1];
+                
+                for (let m = last.match; m <= maxMatch; m++) {
+                    cells[m] = last.elo.toFixed(1);
                 }
 
                 rows.push([namePart, channelPart, thumbPart, ...cells.map(csvEscape)].join(','));
