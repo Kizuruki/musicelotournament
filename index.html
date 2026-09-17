@@ -537,6 +537,10 @@
                 <input type="number" id="stageNumberInput" min="0" step="1" style="width:80px;" />
                 <button id="btnSetStage" class="secondary">Set stage</button>
             </div>
+            <p class="muted" style="margin-top:10px;">One-off repair: finds songs that are marked alive but sit at or below the highest eliminated song's Elo (i.e. escaped the prelim cutoff). Shows you the list before changing anything.</p>
+            <div class="row" style="margin-top:4px;">
+                <button id="btnRecheckPrelimCut" class="secondary">Re-check prelim cutoff</button>
+            </div>
         </section>
 
         <section class="card">
@@ -1139,10 +1143,14 @@
         // PRELIM MATCHMAKING & GRADUATION
         // ─────────────────────────────────────────────────────────────────────────────
         function prelimTargetMP() {
-            const elim = state.songs.filter(s => s.eliminated);
-            if (elim.length) return Math.max(...elim.map(s => s.matchesPlayed));
+            // Prelim songs must catch up to the ALIVE pool's MP, not just the frozen
+            // eliminated pool's MP. While those two differ, prelim songs keep playing
+            // against eliminated anchors; once they reach the alive pool's MP they get
+            // graduated (or cut) by graduatePrelimSongs().
             const aliveNonPrelim = state.songs.filter(s => !s.eliminated && !s.prelim);
             if (aliveNonPrelim.length) return Math.min(...aliveNonPrelim.map(s => s.matchesPlayed));
+            const elim = state.songs.filter(s => s.eliminated);
+            if (elim.length) return Math.max(...elim.map(s => s.matchesPlayed));
             return 0;
         }
 
@@ -1171,8 +1179,8 @@
             for (const s of state.songs) {
                 if (s.prelim && !s.eliminated && s.matchesPlayed >= target) {
                     s.prelim = false;
-                    if (s.elo < maxElimElo) {
-                        s.eliminated = true; // Auto-eliminate if below top eliminated song
+                    if (s.elo <= maxElimElo) {
+                        s.eliminated = true; // Auto-eliminate if at or below top eliminated song
                         s.eliminatedStage = 0; // never made it past prelims
                     }
                 }
@@ -1415,7 +1423,12 @@
                     s.rd = Math.round(s.rd * 10) / 10;
                     updates[s.id] = s.elo;
 
-                    if (s.matchesPlayed >= prelimTargetMP()) s.prelim = false;
+                    // NOTE: do NOT clear s.prelim here. Graduation (and the
+                    // "is this song below the elimination bar?" check) is owned
+                    // solely by graduatePrelimSongs(), which runs at the start of
+                    // buildPrelimMatches(). Clearing the flag here used to let
+                    // songs escape that check entirely and survive as "alive"
+                    // even when their Elo was below the cutoff.
                 }
             }
 
@@ -2132,8 +2145,44 @@
 
         document.getElementById('btnOpenEditor').addEventListener('click', openEditor);
 
-        document.getElementById('btnSetStage').addEventListener('click', () => {
-            const v = parseInt(document.getElementById('stageNumberInput').value, 10);
+        document.getElementById('btnRecheckPrelimCut').addEventListener('click', () => {
+            const elimSongs = state.songs.filter(s => s.eliminated);
+            if (!elimSongs.length) { alert('No eliminated songs yet — nothing to check against.'); return; }
+            const maxElimElo = Math.max(...elimSongs.map(s => s.elo));
+            const target = prelimTargetMP();
+
+            const candidates = state.songs.filter(s =>
+                !s.eliminated && s.elo <= maxElimElo && s.matchesPlayed >= target
+            ).sort((a, b) => b.elo - a.elo);
+
+            if (!candidates.length) {
+                alert(`Nothing to fix. No alive songs are at or below the highest eliminated Elo (${maxElimElo.toFixed(1)}).`);
+                return;
+            }
+
+            const list = candidates.map(s => `  ${s.elo.toFixed(1)} — ${s.title}`).join('\n');
+            const msg =
+                `Highest eliminated Elo: ${maxElimElo.toFixed(1)}\n\n` +
+                `${candidates.length} alive song(s) are at or below that bar:\n\n${list}\n\n` +
+                `Review this list carefully. If any of these legitimately survived a stage cutoff and only drifted below the bar afterwards, click Cancel and handle it in the data editor instead.\n\n` +
+                `Eliminate all ${candidates.length} listed song(s)?`;
+
+            if (!confirm(msg)) return;
+
+            for (const s of candidates) {
+                s.eliminated = true;
+                s.prelim = false;
+                if (s.eliminatedStage === null || s.eliminatedStage === undefined) s.eliminatedStage = 0;
+            }
+            pauseAllPlayers();
+            state.currentMatches = []; state.currentMatchIndex = 0;
+            $('#matchArea').style.display = 'none';
+            $('#noMatchMsg').style.display = 'block';
+            renderRankings(); updateStatus(); saveState();
+            alert(`Eliminated ${candidates.length} song(s).`);
+        });
+
+        document.getElementById('btnSetStage').addEventListener('click', () => {            const v = parseInt(document.getElementById('stageNumberInput').value, 10);
             if (isNaN(v) || v < 0) { alert('Enter a stage number (0 or higher).'); return; }
             state.stageDone = v;
             state.opponentMap = {};
