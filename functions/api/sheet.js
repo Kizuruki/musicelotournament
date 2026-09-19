@@ -90,9 +90,11 @@ export async function onRequestPost({ request, env }) {
 
   const sheetName = env.GOOGLE_SHEET_NAME || 'Sheet1';
   const lastRow = rows.length + 1; // +1 for header row
-  const range = `${sheetName}!A2:H${lastRow}`;
+  // Column I carries the artist/channel name stored per song in the app.
+  const range = `${sheetName}!A2:I${lastRow}`;
   const values = rows.map(r => [
-    r.rank, r.id, r.title, r.url, r.elo, r.rd, r.matchesPlayed, r.eliminated ? 'y' : 'n'
+    r.rank, r.id, r.title, r.url, r.elo, r.rd, r.matchesPlayed, r.eliminated ? 'y' : 'n',
+    r.channel || ''
   ]);
 
   const sheetsRes = await fetch(
