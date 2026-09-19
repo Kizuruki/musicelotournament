@@ -962,7 +962,8 @@
                         elo: Number(s.elo.toFixed(1)),
                         rd: Number(s.rd.toFixed(0)),
                         matchesPlayed: s.matchesPlayed,
-                        eliminated: !!s.eliminated
+                        eliminated: !!s.eliminated,
+                        channel: s.channel || ''   // artist name -> column I
                     }));
 
                 const res = await fetch('/api/sheet', {
