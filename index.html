@@ -212,6 +212,11 @@
             font-variant-numeric: tabular-nums;
         }
 
+            .slot-stats .slot-rank {
+                color: #e5e7eb;
+                font-weight: 600;
+            }
+
             .slot-stats .rd-tight { color: #4ade80; }
             .slot-stats .rd-moderate { color: #facc15; }
             .slot-stats .rd-uncertain { color: #f87171; }
@@ -537,7 +542,7 @@
                 <input type="number" id="stageNumberInput" min="0" step="1" style="width:80px;" />
                 <button id="btnSetStage" class="secondary">Set stage</button>
             </div>
-            <p class="muted" style="margin-top:10px;">One-off repair: finds songs that are marked alive but sit at or below the highest eliminated song's Elo (i.e. escaped the prelim cutoff). Shows you the list before changing anything.</p>
+            <p class="muted" style="margin-top:10px;">One-off repair: finds songs marked alive that rank below the current stage's survivor bar (top 50%<sup>stage</sup> of the whole field). Shows you the list before changing anything.</p>
             <div class="row" style="margin-top:4px;">
                 <button id="btnRecheckPrelimCut" class="secondary">Re-check prelim cutoff</button>
             </div>
@@ -673,7 +678,13 @@
         const APPEARANCES_PER_CYCLE = 2;
 
         const RD_START = 150;
-        const RD_FLOOR = 30;
+        // RD floor: the smallest uncertainty a song can settle to. This has to be
+        // small relative to the actual spread of the field, otherwise every song's
+        // confidence range overlaps everything else and RD stops distinguishing
+        // anything. With the field spanning roughly 970-1037 Elo (~67 points), a
+        // floor of 30 meant a +/-60 window swallowing the whole spread; 8 keeps a
+        // settled song's range meaningfully narrower than the gaps between songs.
+        const RD_FLOOR = 8;
 
         const shuffle = arr =>
             arr.map(v => [Math.random(), v]).sort((a, b) => a[0] - b[0]).map(x => x[1]);
@@ -829,7 +840,30 @@
             state.raceLog = Array.isArray(s.raceLog) ? s.raceLog : [];
             state.matchCounter = s.matchCounter ?? 0;
             updatePrelimFlags();
+            purgeContaminatedMatches();
             return true;
+        }
+
+        // Drop any queued non-prelim match that contains an eliminated (or missing)
+        // song. Matches are built in batches, so hand-editing a song to eliminated,
+        // or a cutoff firing, can leave stale matches in the queue that would
+        // otherwise put an eliminated song back in front of alive ones.
+        function purgeContaminatedMatches() {
+            if (!Array.isArray(state.currentMatches) || !state.currentMatches.length) return 0;
+            const before = state.currentMatches.length;
+            state.currentMatches = state.currentMatches.filter(m => {
+                if (!m || !Array.isArray(m.ids)) return false;
+                if (m.prelim) return true; // prelim matches are SUPPOSED to include eliminated anchors
+                return m.ids.every(id => {
+                    const s = findSong(id);
+                    return s && !s.eliminated && !s.prelim;
+                });
+            });
+            const removed = before - state.currentMatches.length;
+            if (removed > 0 && state.currentMatchIndex >= state.currentMatches.length) {
+                state.currentMatchIndex = 0;
+            }
+            return removed;
         }
 
         function saveState() {
@@ -1087,6 +1121,7 @@
 
             state.stageDone++;
             state.opponentMap = {};
+            purgeContaminatedMatches(); // nobody just cut may appear in a queued match
             saveState();
 
             const aliveNow = state.songs.filter(s => !s.eliminated && !s.prelim);
@@ -1167,23 +1202,59 @@
             }
         }
 
-        // Graduate prelim songs or eliminate them if lower than max eliminated song Elo
+        // How many songs SHOULD still be standing at the current stage, out of the
+        // whole field. Each completed stage halves the field, so after `stageDone`
+        // cutoffs the survivors are total * 0.5^stageDone. New prelim songs joining
+        // late are held to that same bar: with 100 songs cut to 50 and 20 newcomers
+        // added, the field is 120, the bar is 60, so at most 10 newcomers survive.
+        function survivorTargetCount() {
+            const total = state.songs.length;
+            if (!total) return 0;
+            const keepFraction = Math.pow(0.5, state.stageDone);
+            return Math.max(1, Math.round(total * keepFraction));
+        }
+
+        // Graduate prelim songs that have caught up, cutting any that land below the
+        // stage's rank bar. Ranking is by Elo across the ENTIRE field (alive,
+        // eliminated and prelim alike), so a newcomer has to genuinely out-rank the
+        // songs that earned their place. Only prelim songs are ever cut here —
+        // already-alive songs are never re-eliminated by a newcomer passing them.
         function graduatePrelimSongs() {
             const elimSongs = state.songs.filter(s => s.eliminated);
             if (!elimSongs.length) {
+                // No cutoff has happened yet, so there is no bar to clear.
                 for (const s of state.songs) if (s.prelim) s.prelim = false;
                 return;
             }
-            const maxElimElo = Math.max(...elimSongs.map(s => s.elo));
-            const target = prelimTargetMP();
 
-            for (const s of state.songs) {
-                if (s.prelim && !s.eliminated && s.matchesPlayed >= target) {
-                    s.prelim = false;
-                    if (s.elo <= maxElimElo) {
-                        s.eliminated = true; // Auto-eliminate if at or below top eliminated song
-                        s.eliminatedStage = 0; // never made it past prelims
-                    }
+            const target = prelimTargetMP();
+            const ready = state.songs.filter(s => s.prelim && !s.eliminated && s.matchesPlayed >= target);
+            if (!ready.length) return;
+
+            const sorted = state.songs.slice().sort((a, b) => {
+                if (b.elo !== a.elo) return b.elo - a.elo;
+                if (a.rd !== b.rd) return a.rd - b.rd;
+                return a.title.localeCompare(b.title);
+            });
+
+            let keep = Math.min(survivorTargetCount(), sorted.length);
+
+            // A block of Elo-tied songs is never split by the bar: if the bar falls
+            // inside a tie, everyone tied with it survives (so with #58-#62 all tied,
+            // a prelim song sitting at #60 or #62 stays in).
+            const EPS = 1e-9;
+            if (keep > 0 && keep < sorted.length) {
+                const cutElo = sorted[keep - 1].elo;
+                while (keep < sorted.length && Math.abs(sorted[keep].elo - cutElo) < EPS) keep++;
+            }
+
+            const keepIds = new Set(sorted.slice(0, keep).map(s => s.id));
+
+            for (const s of ready) {
+                s.prelim = false;
+                if (!keepIds.has(s.id)) {
+                    s.eliminated = true;
+                    s.eliminatedStage = 0; // never made it past prelims
                 }
             }
         }
@@ -1611,14 +1682,26 @@
                 return;
             }
 
-            // Safety: check for misqueued matches with prelim songs and reset if found
-            if (state.mode === 'normal' && !match.prelim) {
-                if (match.ids.some(id => findSong(id)?.prelim)) {
+            // Safety: a non-prelim match must never contain a prelim OR an eliminated
+            // song. Queued matches are built ahead of time, so a song eliminated since
+            // the queue was built (or marked eliminated by hand) could still be sitting
+            // in it. Throw the stale queue away and rebuild rather than showing it.
+            if (!match.prelim && (state.mode === 'normal' || state.mode === 'final')) {
+                const contaminated = match.ids.some(id => {
+                    const s = findSong(id);
+                    return !s || s.prelim || s.eliminated;
+                });
+                if (contaminated) {
                     state.currentMatches = [];
                     state.currentMatchIndex = 0;
-                    if (!buildNextMatchesNormal()) {
+                    if (state.mode === 'final') {
+                        const aliveNow = state.songs.filter(s => !s.eliminated && !s.prelim);
+                        if (aliveNow.length > 1) enterFinalStage();
+                    }
+                    if (!state.currentMatches.length && !buildNextMatchesNormal()) {
                         $('#matchArea').style.display = 'none';
                         $('#noMatchMsg').style.display = 'block';
+                        $('#progressLine').textContent = 'Queued matches contained eliminated songs and were discarded. Press Start / Continue.';
                         saveState(); return;
                     }
                     match = getCurrentMatch();
@@ -1636,7 +1719,8 @@
             const ids = match.ids;
             const aliveCount = state.songs.filter(s => !s.eliminated && !s.prelim).length;
             pauseAllPlayers();
-            for (let slot = 0; slot < 4; slot++) setSlot(slot, ids[slot] ? findSong(ids[slot]) : null);
+            const rankMap = currentRankMap();
+            for (let slot = 0; slot < 4; slot++) setSlot(slot, ids[slot] ? findSong(ids[slot]) : null, rankMap);
 
             if (state.mode === 'final') {
                 const idx = state.currentMatchIndex + 1;
@@ -1675,22 +1759,35 @@
                 `${total} songs · ${alive} alive${prelimNote} · Stage ${state.stageDone + 1} ${nextCut} · ${phaseMap[state.mode] || state.mode}`;
         }
 
+        // Single source of truth for standings order: alive above eliminated;
+        // among eliminated, whoever survived to a later stage ranks higher even on
+        // a lower final Elo; then Elo, then tighter RD, then title.
+        function compareForRanking(a, b) {
+            if (a.eliminated !== b.eliminated) return a.eliminated ? 1 : -1;
+            if (a.eliminated && b.eliminated) {
+                const as = a.eliminatedStage ?? -1;
+                const bs = b.eliminatedStage ?? -1;
+                if (as !== bs) return bs - as;
+            }
+            if (b.elo !== a.elo) return b.elo - a.elo;
+            if (a.rd !== b.rd) return a.rd - b.rd;
+            return a.title.localeCompare(b.title);
+        }
+
+        // id -> current standings position (1-based), recomputed on demand so the
+        // match view can label each song with where it currently sits.
+        function currentRankMap() {
+            const map = {};
+            state.songs.slice().sort(compareForRanking).forEach((s, i) => { map[s.id] = i + 1; });
+            return map;
+        }
+
         function renderRankings() {
             const host = document.getElementById('rankings');
             host.innerHTML = '';
             if (!state.songs.length) return;
 
-            const sorted = state.songs.slice().sort((a, b) => {
-                if (a.eliminated !== b.eliminated) return a.eliminated ? 1 : -1;
-                if (a.eliminated && b.eliminated) {
-                    const as = a.eliminatedStage ?? -1;
-                    const bs = b.eliminatedStage ?? -1;
-                    if (as !== bs) return bs - as; // made it further -> ranks higher, even with a lower final Elo
-                }
-                if (b.elo !== a.elo) return b.elo - a.elo;
-                if (a.rd !== b.rd) return a.rd - b.rd;
-                return a.title.localeCompare(b.title);
-            });
+            const sorted = state.songs.slice().sort(compareForRanking);
 
             sorted.forEach((s, index) => {
                 const div = document.createElement('div');                div.className = 'rank-item' + (s.eliminated ? ' eliminated' : '');
@@ -1735,7 +1832,7 @@
                 if (p && typeof p.pauseVideo === 'function') { try { p.pauseVideo(); } catch (e) { } }
             }
         }
-        function setSlot(slotIndex, song) {
+        function setSlot(slotIndex, song, rankMap) {
             const media = document.getElementById(`slot${slotIndex}Media`);
             const title = document.getElementById(`slot${slotIndex}Title`);
             const link = document.getElementById(`slot${slotIndex}Link`);
@@ -1759,7 +1856,9 @@
                 const rdPct = Math.round(((song.rd - RD_FLOOR) / (RD_START - RD_FLOOR)) * 100);
                 const rdCls = rdPct > 66 ? 'rd-uncertain' : rdPct > 33 ? 'rd-moderate' : 'rd-tight';
                 const rdLabel = rdPct > 66 ? 'uncertain' : rdPct > 33 ? 'moderate' : 'confident';
-                stats.innerHTML = `Elo: ${song.elo.toFixed(1)} &nbsp;·&nbsp; <span class="${rdCls}">±${song.rd.toFixed(0)} RD (${rdLabel})</span>`;
+                const rank = (rankMap || {})[song.id];
+                const rankPart = rank ? `<span class="slot-rank">#${rank}</span> &nbsp;·&nbsp; ` : '';
+                stats.innerHTML = `${rankPart}Elo: ${song.elo.toFixed(1)} &nbsp;·&nbsp; <span class="${rdCls}">±${song.rd.toFixed(0)} RD (${rdLabel})</span>`;
             }
             const img = document.createElement('img');
             img.src = `https://i.ytimg.com/vi/${song.id}/mqdefault.jpg`;
@@ -2149,23 +2248,36 @@
         document.getElementById('btnRecheckPrelimCut').addEventListener('click', () => {
             const elimSongs = state.songs.filter(s => s.eliminated);
             if (!elimSongs.length) { alert('No eliminated songs yet — nothing to check against.'); return; }
-            const maxElimElo = Math.max(...elimSongs.map(s => s.elo));
-            const target = prelimTargetMP();
 
-            const candidates = state.songs.filter(s =>
-                !s.eliminated && s.elo <= maxElimElo && s.matchesPlayed >= target
-            ).sort((a, b) => b.elo - a.elo);
+            // Same bar graduatePrelimSongs() uses: rank the whole field by Elo, keep
+            // the top total * 0.5^stageDone, never splitting an Elo-tie block.
+            const sorted = state.songs.slice().sort((a, b) => {
+                if (b.elo !== a.elo) return b.elo - a.elo;
+                if (a.rd !== b.rd) return a.rd - b.rd;
+                return a.title.localeCompare(b.title);
+            });
+            let keep = Math.min(survivorTargetCount(), sorted.length);
+            const EPS = 1e-9;
+            if (keep > 0 && keep < sorted.length) {
+                const cutElo = sorted[keep - 1].elo;
+                while (keep < sorted.length && Math.abs(sorted[keep].elo - cutElo) < EPS) keep++;
+            }
+            const keepIds = new Set(sorted.slice(0, keep).map(s => s.id));
+            const rankOf = {};
+            sorted.forEach((s, i) => { rankOf[s.id] = i + 1; });
+
+            const candidates = sorted.filter(s => !s.eliminated && !keepIds.has(s.id));
 
             if (!candidates.length) {
-                alert(`Nothing to fix. No alive songs are at or below the highest eliminated Elo (${maxElimElo.toFixed(1)}).`);
+                alert(`Nothing to fix. Every alive song is inside the top ${keep} of ${sorted.length}.`);
                 return;
             }
 
-            const list = candidates.map(s => `  ${s.elo.toFixed(1)} — ${s.title}`).join('\n');
+            const list = candidates.map(s => `  #${rankOf[s.id]}  ${s.elo.toFixed(1)} — ${s.title}`).join('\n');
             const msg =
-                `Highest eliminated Elo: ${maxElimElo.toFixed(1)}\n\n` +
-                `${candidates.length} alive song(s) are at or below that bar:\n\n${list}\n\n` +
-                `Review this list carefully. If any of these legitimately survived a stage cutoff and only drifted below the bar afterwards, click Cancel and handle it in the data editor instead.\n\n` +
+                `Stage ${state.stageDone}: the field of ${sorted.length} should be down to its top ${keep}.\n\n` +
+                `${candidates.length} alive song(s) rank below that bar:\n\n${list}\n\n` +
+                `Careful: this sweep cannot tell "escaped the prelim cut" apart from "legitimately survived a stage cutoff, then drifted down afterwards". If any of these earned their place in a real cutoff, click Cancel and handle it in the data editor instead.\n\n` +
                 `Eliminate all ${candidates.length} listed song(s)?`;
 
             if (!confirm(msg)) return;
@@ -2249,8 +2361,17 @@
             state.totalSongs = newSongs.length;
             state.initialCount = state.initialCount || newSongs.length;
             updatePrelimFlags();
+            // Editing elimination flags can strand queued matches that still contain
+            // a song just marked eliminated — drop those rather than showing them.
+            const dropped = purgeContaminatedMatches();
             closeEditor();
+            if (dropped > 0) {
+                $('#matchArea').style.display = 'none';
+                $('#noMatchMsg').style.display = 'block';
+                $('#progressLine').textContent = `Discarded ${dropped} queued match(es) containing eliminated songs. Press Start / Continue.`;
+            }
             renderRankings(); updateStatus(); saveState();
+            if (dropped > 0) alert(`Saved. Discarded ${dropped} queued match(es) that contained eliminated songs.`);
         });
 
         document.getElementById('btnSaveToken').addEventListener('click', async () => {
