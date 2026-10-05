@@ -485,8 +485,8 @@
                 <strong>Stage system:</strong> 450→225→112→56→20→8→final.<br>
                 Each stage: 6 matchesPlayed (3 group appearances) before cutoff.<br>
                 Groups of 3–4 normally; groups of 3 when ≤20 alive; 1v1 final when ≤8.<br>
-                <strong>Elo:</strong> K decays from 32→6 as matches accumulate.<br>
-                <strong>RD (uncertainty):</strong> starts at ±150, shrinks faster vs similar opponents.<br>
+                <strong>Elo:</strong> K scales with RD: 32 when unknown → 6 when settled.<br>
+                <strong>Elo / RD:</strong> see the rating-system toggle in section 6. Old: K 32→6 by matches, RD ±150→8. New: K 26→6 by RD, RD ±50→3, shrinks faster vs close-Elo, low-RD opponents.<br>
                 Matchmaking: 70% Elo-close · 15% high-RD · 15% random.
             </p>
             <div class="row" style="margin-top:4px;margin-bottom:6px;">
@@ -545,6 +545,10 @@
             <p class="muted" style="margin-top:10px;">One-off repair: finds songs marked alive that rank below the current stage's survivor bar (top 50%<sup>stage</sup> of the whole field). Shows you the list before changing anything.</p>
             <div class="row" style="margin-top:4px;">
                 <button id="btnRecheckPrelimCut" class="secondary">Re-check prelim cutoff</button>
+            </div>
+            <p class="muted" style="margin-top:10px;">Rating system. Switch between stages, not mid-appearance.</p>
+            <div class="row" style="margin-top:4px;">
+                <button id="btnRdSystem" class="secondary">Using OLD RD/K system — switch to new</button>
             </div>
         </section>
 
@@ -655,17 +659,31 @@
         const $ = sel => document.querySelector(sel);
         const STORAGE_KEY = 'yt-elo-tournament-v2';
 
-        // Elo K-factor: decays with matchesPlayed, floor at 6
-        function kFactor(matchesPlayed) {
-            return Math.max(6, 32 - 2 * matchesPlayed);
+        const K_MAX = 26;                 // K for a completely unknown song (RD at RD_START)
+        const K_MIN = 6;                  // K for a fully settled song (RD at RD_FLOOR)
+        const RD_SHRINK_PER_OPPONENT = 0.12; // fraction of (rd - floor) removed per fully-informative opponent
+        const RD_CLOSE_WINDOW = 8;       // Elo gap at which an opponent counts as "half as informative"
+        const RD_MIN_RELIABILITY = 0.3;   // how much a brand-new (max-RD) opponent still tells you
+        
+        // K now follows the song's OWN uncertainty instead of its match count
+        function kFromRd(rd) {
+            const t = Math.min(1, Math.max(0, (rd - RD_FLOOR) / (RD_START - RD_FLOOR)));
+            return K_MIN + (K_MAX - K_MIN) * t;
         }
-
-        // RD decay per match: more decay when opponents are close in Elo
-        function rdDecay(eloDiff) {
-            const decay = 10 * (1 - Math.min(eloDiff, 600) / 600);
-            return Math.max(2, decay);
+        
+        // How much facing one opponent tells us about a song's true Elo (0..1).
+        // Close in Elo AND low opponent RD = very informative.
+        function opponentInfo(eloDiff, oppRd) {
+            const closeness = 1 / (1 + Math.pow(eloDiff / RD_CLOSE_WINDOW, 2));
+            const certainty = Math.min(1, Math.max(0, 1 - (oppRd - RD_FLOOR) / (RD_START - RD_FLOOR)));
+            const reliability = RD_MIN_RELIABILITY + (1 - RD_MIN_RELIABILITY) * certainty;
+            return closeness * reliability;
         }
-
+        
+        // Shrink RD toward the floor by a percentage, based on total info gained this match
+        function shrinkRd(rd, totalInfo) {
+            return RD_FLOOR + (rd - RD_FLOOR) * Math.pow(1 - RD_SHRINK_PER_OPPONENT, totalInfo);
+        }
         // Stage definitions
         // Dynamic stage sizing: keep ~50% each stage (adjusted to keep whole Elo-tie
         // blocks together, picking whichever side lands closer to the 50% target —
@@ -677,14 +695,39 @@
         const MP_PER_APPEARANCE = 3;
         const APPEARANCES_PER_CYCLE = 2;
 
-        const RD_START = 150;
-        // RD floor: the smallest uncertainty a song can settle to. This has to be
-        // small relative to the actual spread of the field, otherwise every song's
-        // confidence range overlaps everything else and RD stops distinguishing
-        // anything. With the field spanning roughly 970-1037 Elo (~67 points), a
-        // floor of 30 meant a +/-60 window swallowing the whole spread; 8 keeps a
-        // settled song's range meaningfully narrower than the gaps between songs.
-        const RD_FLOOR = 8;
+        // Two rating systems: 'old' (original) and 'new' (RD-driven K, info-based RD shrink).
+        const OLD_RD = { start: 150, floor: 8 };
+        const NEW_RD = { start: 50, floor: K_MIN / 2 };
+        let RD_START = OLD_RD.start;
+        let RD_FLOOR = OLD_RD.floor;
+        
+        function setRdSystem(sys) {
+            state.rdSystem = sys === 'new' ? 'new' : 'old';
+            const cfg = state.rdSystem === 'new' ? NEW_RD : OLD_RD;
+            RD_START = cfg.start;
+            RD_FLOOR = cfg.floor;
+            updateRdSystemButton();
+        }
+        
+        // ── Old system (kept so stage 2 can finish on it) ──
+        function kFactor(matchesPlayed) { return Math.max(6, 32 - 2 * matchesPlayed); }
+        function rdDecay(eloDiff) { return Math.max(2, 10 * (1 - Math.min(eloDiff, 600) / 600)); }
+        
+        // ── Switchers used by the Elo functions ──
+        function kForSong(snap) {
+            return state.rdSystem === 'new' ? kFromRd(snap.rd) : kFactor(snap.matchesPlayed);
+        }
+        function rdEvidence(eloDiff, oppRd) {
+            return state.rdSystem === 'new' ? opponentInfo(eloDiff, oppRd) : rdDecay(eloDiff);
+        }
+        function nextRd(rd, total) {
+            return Math.max(RD_FLOOR, state.rdSystem === 'new' ? shrinkRd(rd, total) : rd - total);
+        }
+        
+        function convertRd(rd, from, to) {
+            const t = (Math.min(from.start, Math.max(from.floor, rd)) - from.floor) / (from.start - from.floor);
+            return Math.round((to.floor + t * (to.start - to.floor)) * 10) / 10;
+        }
 
         const shuffle = arr =>
             arr.map(v => [Math.random(), v]).sort((a, b) => a[0] - b[0]).map(x => x[1]);
@@ -744,7 +787,7 @@
                 title: title || 'Song',
                 url: url || ('https://www.youtube.com/watch?v=' + id),
                 elo: typeof elo === 'number' && isFinite(elo) ? elo : 1000.0,
-                rd: typeof rd === 'number' && isFinite(rd) ? Math.max(RD_FLOOR, rd) : RD_START,
+                rd: typeof rd === 'number' && isFinite(rd) ? Math.min(RD_START, Math.max(RD_FLOOR, rd)) : RD_START,
                 matchesPlayed: (typeof matchesPlayed === 'number' && isFinite(matchesPlayed)) ? matchesPlayed : 0,
                 eliminated: !!eliminated,
                 channel: channel || '',
@@ -771,6 +814,7 @@
             songs: [],
             totalSongs: 0,
             initialCount: 0,
+            rdSystem: 'old',
             stageDone: 0,
             mode: 'idle',          // idle | normal | final | done
             currentMatches: [],
@@ -817,6 +861,7 @@
                 finalPairs: state.finalPairs,
                 finalPairIndex: state.finalPairIndex,
                 raceLog: state.raceLog,
+                rdSystem: state.rdSystem,
                 matchCounter: state.matchCounter,
                 savedAt: Date.now()
             };
@@ -824,6 +869,7 @@
 
         function applyLoadedState(s) {
             if (!s || !Array.isArray(s.songs) || !s.songs.length) return false;
+            setRdSystem(s.rdSystem === 'new' ? 'new' : 'old');
             state.songs = s.songs.map(x => makeSong(x.id, x.title, x.url, x.elo, x.rd, x.matchesPlayed, x.eliminated, x.channel, x.prelim, x.eliminatedStage));
             state.totalSongs = s.totalSongs ?? state.songs.length;
             state.initialCount = s.initialCount ?? state.songs.length;
@@ -1386,7 +1432,7 @@
                     let best = null, bestScore = Infinity;
                     for (const candidate of pool) {
                         const eloDiff = Math.abs((candidate.elo || 1000) - (seed.elo || 1000));
-                        const rdBonus = -candidate.rd * 0.5;
+                        const rdBonus = -candidate.rd * (state.rdSystem === 'new' ? 1.5 : 0.5);
                         let conf = 0;
                         for (const member of group) if (haveBeenOpponents(candidate.id, member.id)) conf++;
                         const score = eloDiff + rdBonus + conf * 500;
@@ -1454,8 +1500,8 @@
                 if (s) snapshot[id] = { elo: s.elo, rd: s.rd, matchesPlayed: s.matchesPlayed, prelim: s.prelim };
             }
 
-            const eloDelta = {}, rdDelta = {};
-            for (const id of match.ids) { eloDelta[id] = 0; rdDelta[id] = 0; }
+            const eloDelta = {}, rdInfo = {};
+            for (const id of match.ids) { eloDelta[id] = 0; rdInfo[id] = 0; }
 
             // 2. Pairwise Elo + RD updates (eliminated songs remain frozen)
             for (let i = 0; i < rankingIds.length; i++) {
@@ -1471,15 +1517,15 @@
                     const El = 1 - Ew;
 
                     if (wSnap.prelim) {
-                        const Kw = kFactor(wSnap.matchesPlayed) / (groupSize - 1);
+                        const Kw = kForSong(wSnap) / (groupSize - 1);
                         eloDelta[wId] += Kw * (1 - Ew);
-                        rdDelta[wId] += rdDecay(eloDiff);
+                        rdInfo[wId] += rdEvidence(eloDiff, lSnap.rd);
                     }
-
+                    
                     if (lSnap.prelim) {
-                        const Kl = kFactor(lSnap.matchesPlayed) / (groupSize - 1);
+                        const Kl = kForSong(lSnap) / (groupSize - 1);
                         eloDelta[lId] += Kl * (0 - El);
-                        rdDelta[lId] += rdDecay(eloDiff);
+                        rdInfo[lId] += rdEvidence(eloDiff, wSnap.rd);
                     }
                 }
             }
@@ -1490,7 +1536,7 @@
                 const s = findSong(id);
                 if (s && s.prelim) {
                     s.elo = snapshot[id].elo + eloDelta[id];
-                    s.rd = Math.max(RD_FLOOR, snapshot[id].rd - rdDelta[id]);
+                    s.rd = nextRd(snapshot[id].rd, rdInfo[id]);
                     s.elo = Math.round(s.elo * 10) / 10;
                     s.rd = Math.round(s.rd * 10) / 10;
                     updates[s.id] = s.elo;
@@ -1531,8 +1577,8 @@
                 if (s) snapshot[id] = { elo: s.elo, rd: s.rd, matchesPlayed: s.matchesPlayed };
             }
 
-            const eloDelta = {}, rdDelta = {};
-            for (const id of ids) { eloDelta[id] = 0; rdDelta[id] = 0; }
+            const eloDelta = {}, rdInfo = {};
+            for (const id of ids) { eloDelta[id] = 0; rdInfo[id] = 0; }
 
             for (let i = 0; i < rankingIds.length; i++) {
                 for (let j = i + 1; j < rankingIds.length; j++) {
@@ -1543,8 +1589,8 @@
                     const Rw = wSnap.elo, Rl = lSnap.elo;
                     const eloDiff = Math.abs(Rw - Rl);
 
-                    const Kw = kFactor(wSnap.matchesPlayed) / (groupSize - 1);
-                    const Kl = kFactor(lSnap.matchesPlayed) / (groupSize - 1);
+                    const Kw = kForSong(wSnap) / (groupSize - 1);
+                    const Kl = kForSong(lSnap) / (groupSize - 1);
 
                     const Ew = 1 / (1 + Math.pow(10, (Rl - Rw) / 400));
                     const El = 1 - Ew;
@@ -1552,9 +1598,8 @@
                     eloDelta[wId] += Kw * (1 - Ew);
                     eloDelta[lId] += Kl * (0 - El);
 
-                    const decay = rdDecay(eloDiff);
-                    rdDelta[wId] += decay;
-                    rdDelta[lId] += decay;
+                    rdInfo[wId] += rdEvidence(eloDiff, lSnap.rd); // what the loser tells us about the winner
+                    rdInfo[lId] += rdEvidence(eloDiff, wSnap.rd); // and vice versa
                 }
             }
 
@@ -1562,7 +1607,7 @@
                 const s = findSong(id);
                 if (!s) continue;
                 s.elo = snapshot[id].elo + eloDelta[id];
-                s.rd = Math.max(RD_FLOOR, snapshot[id].rd - rdDelta[id]);
+                s.rd = nextRd(snapshot[id].rd, rdInfo[id]);
                 s.elo = Math.round(s.elo * 10) / 10;
                 s.rd = Math.round(s.rd * 10) / 10;
             }
@@ -2307,6 +2352,53 @@
         });
         document.getElementById('btnEditorCancel').addEventListener('click', closeEditor);
 
+        function updateRdSystemButton() {
+            const b = document.getElementById('btnRdSystem');
+            if (!b) return;
+            b.textContent = state.rdSystem === 'new'
+                ? 'Using NEW RD/K system — switch back to old'
+                : 'Using OLD RD/K system — switch to new';
+        }
+        
+        document.getElementById('btnRdSystem').addEventListener('click', () => {
+            const toNew = state.rdSystem !== 'new';
+            const target = toNew ? 'NEW' : 'OLD';
+            const alive = state.songs.filter(s => !s.eliminated && !s.prelim);
+        
+            // Warn if mid-appearance (alive songs don't all have the same MP)
+            if (alive.length) {
+                const mps = alive.map(s => s.matchesPlayed);
+                if (Math.min(...mps) !== Math.max(...mps) &&
+                    !confirm(`Alive songs have different MP (${Math.min(...mps)}–${Math.max(...mps)}), so you're mid-appearance. Some songs would play this appearance under different rules.\n\nSwitch anyway?`)) return;
+            }
+        
+            if (!confirm(`Switch to the ${target} rating system?`)) return;
+        
+            const pool = alive.length ? alive : state.songs;
+            const rds = pool.map(s => s.rd);
+            const lo = rds.length ? Math.min(...rds).toFixed(0) : '–';
+            const hi = rds.length ? Math.max(...rds).toFixed(0) : '–';
+            const hint = toNew
+                ? `Old scale is ±${OLD_RD.floor}–${OLD_RD.start}; new scale is ±${NEW_RD.floor}–${NEW_RD.start}.`
+                : `New scale is ±${NEW_RD.floor}–${NEW_RD.start}; old scale is ±${OLD_RD.floor}–${OLD_RD.start}.`;
+            const convert = confirm(
+                `Alive songs' RD currently ranges ±${lo} to ±${hi}.\n${hint}\n\n` +
+                `OK = convert all RDs to the ${target} scale\n` +
+                `Cancel = switch WITHOUT converting (only if they're already on the ${target} scale)`
+            );
+        
+            if (convert) {
+                const from = toNew ? OLD_RD : NEW_RD;
+                const to = toNew ? NEW_RD : OLD_RD;
+                for (const s of state.songs) s.rd = convertRd(s.rd, from, to);
+            }
+            setRdSystem(toNew ? 'new' : 'old');
+            for (const s of state.songs) s.rd = Math.min(RD_START, Math.max(RD_FLOOR, s.rd));
+        
+            renderRankings(); updateStatus(); saveState();
+            alert(`Now using the ${target} system${convert ? ' (RDs converted)' : ''}.`);
+        });
+        
         document.getElementById('btnEditorAddRow').addEventListener('click', () => {
             const tr = document.createElement('tr');
             tr.innerHTML = `
