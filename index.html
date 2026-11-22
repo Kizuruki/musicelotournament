@@ -1229,7 +1229,10 @@
             // eliminated pool's MP. While those two differ, prelim songs keep playing
             // against eliminated anchors; once they reach the alive pool's MP they get
             // graduated (or cut) by graduatePrelimSongs().
-            const aliveNonPrelim = state.songs.filter(s => !s.eliminated && !s.prelim);
+            // Ignore songs below the MP every real survivor has (stageDone * CYCLE_MP).
+            // Otherwise a brand-new MP-0 song drags the target to 0 and never gets flagged.
+            const stageFloor = state.stageDone * CYCLE_MP;
+            const aliveNonPrelim = state.songs.filter(s => !s.eliminated && !s.prelim && s.matchesPlayed >= stageFloor);
             if (aliveNonPrelim.length) return Math.min(...aliveNonPrelim.map(s => s.matchesPlayed));
             const elim = state.songs.filter(s => s.eliminated);
             if (elim.length) return Math.max(...elim.map(s => s.matchesPlayed));
